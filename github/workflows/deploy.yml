@@ -1,0 +1,69 @@
+name: Deploy n8n workflows
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-n8n
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Validate workflows with jq
+        run: |
+          shopt -s nullglob
+          for f in workflows/*.json; do
+            echo "Validating syntax: $f"; jq . "$f" > /dev/null
+          done
+
+      - name: Strict validate with custom validator
+        run: |
+          node scripts/validate_workflows.js
+
+      - name: Deploy to n8n via REST API (create or update)
+        env:
+          N8N_BASE_URL: ${{ secrets.N8N_BASE_URL }}
+          N8N_API_KEY:  ${{ secrets.N8N_API_KEY }}
+        run: |
+          set -e
+          api() { curl --retry 3 --retry-delay 2 -sS -H "X-N8N-API-KEY: $N8N_API_KEY" -H "Content-Type: application/json" "$@"; }
+          list_json=$(api "$N8N_BASE_URL/api/v1/workflows")
+
+          shopt -s nullglob
+          for f in workflows/*.json; do
+            NAME=$(jq -r '.name' "$f")
+            if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then echo "ERROR: .name не задан в $f"; exit 1; fi
+            echo "Processing workflow: $NAME"
+            ID=$(echo "$list_json" | jq --arg n "$NAME" -r '.data[] | select(.name==$n) | .id' | head -n1)
+            if [ -z "$ID" ]; then
+              echo "Creating: $NAME"
+              api -X POST "$N8N_BASE_URL/api/v1/workflows" --data @"$f" > /dev/null
+            else
+              echo "Updating: $NAME ($ID)"
+              api -X PATCH "$N8N_BASE_URL/api/v1/workflows/$ID" --data @"$f" > /dev/null
+            fi
+          done
+
+      - name: Smoke test (Node)
+        env:
+          N8N_TEST_WEBHOOK_URL: ${{ secrets.N8N_TEST_WEBHOOK_URL }}
+        run: |
+          node scripts/run_webhook_smoke.js "$N8N_TEST_WEBHOOK_URL"
