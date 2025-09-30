@@ -1,0 +1,33 @@
+name: PR Checks (validate n8n JSON)
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+      - name: Validate JSON syntax
+        run: |
+          shopt -s nullglob
+          if compgen -G "workflows/*.json" > /dev/null; then
+            for f in workflows/*.json; do
+              echo "Validating syntax: $f"; jq . "$f" > /dev/null
+            done
+          else
+            echo "No workflows/*.json found; skipping"
+          fi
+      - name: Strict validate with custom validator
+        run: |
+          node scripts/validate_workflows.js || (echo "Custom validation failed" && exit 1)
